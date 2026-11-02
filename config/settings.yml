@@ -1,0 +1,86 @@
+# credit-pricing-lab settings. Rates are annual fractions. Every pricing and
+# funnel number marked "assumption" is a lever, not an estimate from data.
+
+data:
+  # Lending Club accepted loans 2007-2018Q4 (the Kaggle mirror's
+  # accepted_2007_to_2018Q4.csv.gz). Override with CREDITLAB_RAW_PATH.
+  raw_path: data/raw/accepted_2007_to_2018Q4.csv.gz
+  # Snapshot date of the file: the latest last-payment month in it unless set.
+  data_end: null
+
+target:
+  # Default within 12 months: charged off (or 31-120 days late at the
+  # snapshot) having made the last payment within the first 11 months, so the
+  # first missed payment fell inside the 12-month window. The file has no
+  # charge-off date, so this is the closest observable definition.
+  horizon_months: 12
+  default_statuses:
+    - Charged Off
+    - Default
+    - "Does not meet the credit policy. Status:Charged Off"
+    - Late (31-120 days)
+
+split:
+  # Out-of-time: models are fitted on the train window, calibrated on the
+  # validation window and judged on the test window only. Loans whose
+  # 12-month window is not complete at data_end are dropped.
+  train: ["2013-01-01", "2015-12-31"]
+  valid: ["2016-01-01", "2016-12-31"]
+  test: ["2017-01-01", "2017-12-31"]
+
+features:
+  # Application-time fields only. Lending Club's own grade, sub-grade,
+  # interest rate and instalment are excluded: they are its risk model and its
+  # price, so using them would copy its view and make pricing circular.
+  numeric: [loan_amnt, term_months, annual_inc_log, loan_to_income, dti, fico, inq_last_6mths, open_acc,
+            total_acc, revol_util, revol_bal_to_income, delinq_2yrs, pub_rec, pub_rec_bankruptcies, mort_acc,
+            credit_history_years, emp_years]
+  categorical: [home_ownership, verification_status, purpose_group, application_type]
+
+models:
+  woe:
+    bins: 10               # quantile bins on the training window
+    min_bin_share: 0.05
+    iv_min: 0.02           # features below this information value are dropped
+    pdo: 20                # scorecard: points to double the odds
+    base_score: 600
+    base_odds: 50
+  gbm:
+    max_iter: 400
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 200
+    l2_regularization: 1.0
+    early_stopping: true
+    # Monotone constraints keep the model explainable: higher FICO never
+    # raises PD; higher DTI, inquiries and utilisation never lower it.
+    monotonic: {fico: -1, dti: 1, inq_last_6mths: 1, revol_util: 1, loan_to_income: 1, annual_inc_log: -1}
+  bootstrap_draws: 200     # out-of-time AUC difference confidence interval
+  random_state: 7
+
+pricing:
+  # Risk bands on the calibrated 12-month PD (upper bounds; the last band is open).
+  band_upper_pd: [0.02, 0.035, 0.05, 0.07, 0.10, 0.14]
+  band_names: [A, B, C, D, E, F, G]
+  # LGD: "empirical" uses the training window's realised loss on charged-off balances (after recoveries net
+  # of collection fees); "assumption" uses lgd below. Either way the report shows both and a sensitivity.
+  lgd_source: empirical
+  lgd: 0.85                # the assumption, used when lgd_source is "assumption" or no loan has charged off
+  lgd_sensitivity: [0.80, 0.85, 0.90, 0.95]
+  cost_of_funds: 0.055     # assumption
+  opex: 0.020              # servicing and acquisition, % of balance a year (assumption)
+  target_margins: [0.02, 0.03, 0.04]
+  apr_cap: 0.36
+
+funnel:
+  # Approval, take-up and pricing response. All assumptions: Lending Club's
+  # file holds only booked loans, so take-up cannot be estimated from it.
+  max_take_up: 0.60        # take-up at a very low price
+  price_sensitivity: 0.35  # logistic slope per percentage point of APR above the band's market rate
+  adverse_selection: 0.03  # PD uplift per percentage point above the market rate
+  min_margin: 0.01         # risk-adjusted margin floor per band
+  max_portfolio_el: 0.06   # credit appetite: booked expected loss rate
+  apr_step: 0.0025
+  sensitivity_multipliers: [0.5, 0.75, 1.0, 1.5, 2.0]
+  # Loss appetites to re-optimise at: where the first band drops out shows the constraint at work.
+  appetite_stress: [0.06, 0.05, 0.045, 0.04, 0.035, 0.03]
